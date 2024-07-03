@@ -1,8 +1,10 @@
-from ultralytics import YOLO
-import torch
+import streamlit as st
 import cv2
 import numpy as np
+from ultralytics import YOLO
 from sort import Sort
+import tempfile
+import torch
 
 # Load a pre-trained YOLOv8 model
 model = YOLO('yolov8n.pt')  # 'yolov8n.pt' is the small version of the model
@@ -19,66 +21,81 @@ def draw_boxes_and_label(frame, tracked_objects):
         cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36, 255, 12), 2)
     return frame
 
-# Load the video
-video_path = 'D:\\2103099-uhd_3840_2160_30fps.mp4'  # Replace with your video file path
-cap = cv2.VideoCapture(video_path)
+# Streamlit UI
+st.title("Car Detection and Tracking with YOLOv8")
+st.write("Upload a video file to detect and track cars.")
 
-if not cap.isOpened():
-    print("Error: Could not open video.")
-    exit()
+uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi", "mkv"])
 
-# Get video properties
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps = cap.get(cv2.CAP_PROP_FPS)
+if uploaded_file is not None:
+    # Save the uploaded video to a temporary file
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+    video_path = tfile.name
 
-# Define the codec and create VideoWriter object
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter('output_video.mp4', fourcc, fps, (width, height))
+    # Load the video
+    cap = cv2.VideoCapture(video_path)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("End of video stream or error.")
-        break
+    if not cap.isOpened():
+        st.error("Error: Could not open video.")
+    else:
+        # Get video properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Perform inference on the frame
-    try:
-        # Convert frame to RGB as YOLO expects RGB images
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = model(rgb_frame, device='cuda' if torch.cuda.is_available() else 'cpu')
-    except Exception as e:
-        print(f"Error during model inference: {e}")
-        break
+        # Define the codec and create VideoWriter object
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out_path = 'output_video.mp4'
+        out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
 
-    # Prepare detections for the tracker
-    detections = []
-    for result in results:
-        for box in result.boxes:
-            cls = box.cls.cpu().numpy()[0]
-            if int(cls) == 2:  # YOLO class '2' corresponds to 'car' in COCO dataset
-                xmin, ymin, xmax, ymax = box.xyxy[0].cpu().numpy()
-                detections.append([xmin, ymin, xmax, ymax, box.conf.cpu().numpy()[0]])
+        # Processing video frames
+        progress_bar = st.progress(0)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        current_frame = 0
 
-    # Update tracker with new detections
-    detections = np.array(detections)
-    tracked_objects = tracker.update(detections[:, :4])  # Use only bbox coordinates for tracking
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    # Draw boxes and label the cars
-    labeled_frame = draw_boxes_and_label(frame.copy(), tracked_objects)
+            # Perform inference on the frame
+            try:
+                # Convert frame to RGB as YOLO expects RGB images
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = model(rgb_frame, device='cuda' if torch.cuda.is_available() else 'cpu')
+            except Exception as e:
+                st.error(f"Error during model inference: {e}")
+                break
 
-    # Write the frame to the output video
-    out.write(labeled_frame)
+            # Prepare detections for the tracker
+            detections = []
+            for result in results:
+                for box in result.boxes:
+                    cls = box.cls.cpu().numpy()[0]
+                    if int(cls) == 2:  # YOLO class '2' corresponds to 'car' in COCO dataset
+                        xmin, ymin, xmax, ymax = box.xyxy[0].cpu().numpy()
+                        detections.append([xmin, ymin, xmax, ymax, box.conf.cpu().numpy()[0]])
 
-    # Display the frame (optional)
-    resized_frame = cv2.resize(labeled_frame, (960, 540))  # Resize frame for display
-    cv2.imshow('Frame', resized_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+            # Update tracker with new detections
+            detections = np.array(detections)
+            tracked_objects = tracker.update(detections[:, :4])  # Use only bbox coordinates for tracking
 
-# Release everything if job is finished
-cap.release()
-out.release()
-cv2.destroyAllWindows()
+            # Draw boxes and label the cars
+            labeled_frame = draw_boxes_and_label(frame.copy(), tracked_objects)
 
-print("Processing complete. Output video saved as 'output_video.mp4'.")
+            # Write the frame to the output video
+            out.write(labeled_frame)
+
+            # Display the frame (optional)
+            st.image(cv2.cvtColor(labeled_frame, cv2.COLOR_BGR2RGB), channels="RGB")
+
+            current_frame += 1
+            progress_bar.progress(current_frame / frame_count)
+
+        # Release everything if job is finished
+        cap.release()
+        out.release()
+        
+        st.success("Processing complete. Output video saved.")
+        st.video(out_path)
